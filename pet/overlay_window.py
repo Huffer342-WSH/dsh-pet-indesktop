@@ -64,6 +64,8 @@ class OverlayWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool
                             | Qt.WindowType.WindowStaysOnTopHint)
+        from .platform_linux import keep_on_all_desktops
+        keep_on_all_desktops(self)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         # Phase 1a 暂不做多屏：默认主屏，调用方可注入别的 QScreen。
