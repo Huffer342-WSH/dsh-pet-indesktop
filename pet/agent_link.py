@@ -2210,6 +2210,28 @@ class OpenCodeMonitor(BaseAgentMonitor):
                 self._emit_tool(tool, emit_gen)
 
 
+class SnapshotAgentMonitor(BaseAgentMonitor):
+    """Read-only session snapshots; reuse the existing worker/Qt lifecycle."""
+
+    snapshot_event = Signal(str, object, int)
+
+    def __init__(self, agent_key, config_dir, events_path, parent=None):
+        super().__init__(agent_key, config_dir, parent)
+        from .agent_snapshot import SnapshotReader
+        self._snapshot_path = events_path
+        self._reader = SnapshotReader(events_path)
+        self._mkdir_on_start = False
+
+    def _worker_started(self):
+        from .agent_snapshot import SnapshotReader
+        self._reader = SnapshotReader(self._snapshot_path)
+
+    def _poll(self, gen=None):
+        summary = self._reader.read()
+        if summary is not None:
+            self._emit(self.snapshot_event, (self.agent_key, summary, self._emit_gen if gen is None else gen))
+
+
 class CustomAgentMonitor(BaseAgentMonitor):
     """自定义联动 Agent 监视器（agent_link.custom_agents 配置驱动）。"""
 
@@ -2285,7 +2307,7 @@ class AgentLinkManager(QObject):
     _exploration_control_result = Signal(str, str, bool, str)
 
     # 联动气泡展示名
-    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "cursor": "Cursor", "opencode": "OpenCode"}
+    AGENT_NAMES = {"dsh": "DSH", "claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "opencode": "OpenCode"}
     # 过程汇报：工具名 → 用户可读文案（不展示原始命令/路径）
     TOOL_LABELS = {
         "read": "正在读文件", "write": "正在写文件", "edit": "正在改代码",
@@ -2376,6 +2398,10 @@ class AgentLinkManager(QObject):
             "cursor": CursorMonitor(self.config_dir, self),
             "opencode": OpenCodeMonitor(self.config_dir, self),
             }
+        from .codex_install import state_path
+        self.monitors['codex'] = SnapshotAgentMonitor(
+            'codex', self.config_dir, self.cfg.get('agent_link', {}).get('codex_state_path') or str(state_path()), self)
+        self.monitors['codex'].snapshot_event.connect(self._on_session_snapshot)
         # 自定义联动 Agent：配置驱动的只读监视器（key/path 已在 config 清洗时
         # 保证合法唯一）；显示名合并进实例级 agent_names，类级 AGENT_NAMES
         # 保持仅内置（modern_settings_dialog 等按内置枚举处不受影响）。
@@ -2385,9 +2411,12 @@ class AgentLinkManager(QObject):
             key = str(item.get("key") or "")
             if not key or key in self.monitors:
                 continue
-            self.monitors[key] = CustomAgentMonitor(
+            monitor_type = SnapshotAgentMonitor if item.get("protocol") == "session-snapshot-v1" else CustomAgentMonitor
+            self.monitors[key] = monitor_type(
                 key, self.config_dir, str(item.get("path") or ""), self,
             )
+            if isinstance(self.monitors[key], SnapshotAgentMonitor):
+                self.monitors[key].snapshot_event.connect(self._on_session_snapshot)
             self.agent_names[key] = str(item.get("name") or key)
 
         # 卡住检测（stuck_detector）：DSH 专属，消费桥接增强记录推断「人工介入更快」。
@@ -2461,6 +2490,43 @@ class AgentLinkManager(QObject):
             self.win.set_link_next_provider(self._next_busy_anim)
 
         self.apply_config()
+
+    def _on_session_snapshot(self, agent_key, summary, gen):
+        if not self._gen_current(agent_key, gen):
+            return
+        previous = getattr(self, '_snapshot_status', {}).get(agent_key, {})
+        if not hasattr(self, '_snapshot_status'):
+            self._snapshot_status = {}
+        self._snapshot_status[agent_key] = summary
+        self._cancel_done_check(agent_key)
+        # These snapshots distinguish waiting/interruption from successful work.
+        # Never enter the legacy busy->attention/idle completion inference path.
+        busy = summary['busy'] > 0
+        if busy:
+            state = 'thinking' if summary['thinking'] == summary['busy'] else 'working'
+            self._on_agent_state(agent_key, state, gen)
+            if summary['tool']:
+                self._on_agent_activity(agent_key, summary['tool'], gen)
+        else:
+            self._last_raw[agent_key] = 'idle'
+            self._last_applied.pop(agent_key, None)
+            self._cost.abort(agent_key)
+            if not self.any_busy() and hasattr(self.win, 'request_link_idle'):
+                self.win.request_link_idle()
+        name = self.agent_names.get(agent_key, agent_key)
+        cfg = self.cfg.get('agent_link', {})
+        if summary['waiting'] and summary['waiting'] != previous.get('waiting') and self._report_allowed(cfg, 'agent.attention'):
+            self._show_link_bubble(f"{name} 有 {summary['waiting']} 个回合等待处理，请回到原窗口查看。", important=True)
+        elif summary['unknown'] and summary['unknown'] != previous.get('unknown') and self._report_allowed(cfg, 'bridge.status'):
+            self._show_link_bubble(f"{name} 的联动状态暂不可用，请到原窗口确认。", important=False)
+        elif summary['ended'] and self._report_allowed(cfg, 'done.attention'):
+            if 'interrupted' in summary['ended']:
+                text = f"{name} 的回合已中断。"
+            elif 'stopped' in summary['ended']:
+                text = f"{name} 的回合已停止，请查看结果。"
+            else:
+                text = f"{name} 的会话已关闭。"
+            self._show_link_bubble(text, important=True)
 
     def _on_normalized_event(self, event) -> None:
         """Consume semantic events for streak tracking and interaction cleanup."""
@@ -2571,6 +2637,24 @@ class AgentLinkManager(QObject):
             return
         if token is not None:
             self._install_pending.pop(agent_key, None)
+        if agent_key == 'codex':
+            desired = getattr(self, '_codex_install_desired', False)
+            agent_cfg = dict(self.cfg.get('agent_link', {}))
+            agent_cfg['codex'] = bool(desired and ok)
+            if desired and ok:
+                from .codex_install import state_path
+                # Menu installation owns the local channel; retire the old manual path.
+                agent_cfg.pop('codex_state_path', None)
+                monitor = self.monitors['codex']
+                if monitor._running:
+                    monitor.stop()
+                monitor._snapshot_path = str(state_path())
+            self.cfg.set('agent_link', agent_cfg)
+            self.cfg.save()
+            self.apply_config()
+            if hasattr(self.win, 'show_bubble'):
+                self.win.show_bubble(msg if ok else f'Codex 联动未就绪：{msg}', duration_ms=8000)
+            return
         if ok:
             ag_cfg = dict(self.cfg.get("agent_link", {}))
             ag_cfg[agent_key] = True
@@ -2593,12 +2677,61 @@ class AgentLinkManager(QObject):
         hooks/桥接插件是全局状态，别的实例还在用就不能卸。"""
         return other_instances_use_agent(self.cfg, agent_key)
 
+    def _change_codex_install(self, enabled):
+        if 'codex' in self._install_pending:
+            return False
+        self._install_token += 1
+        token = self._install_token
+        self._install_pending['codex'] = token
+        self._codex_install_desired = enabled
+        if not enabled:
+            cfg = dict(self.cfg.get('agent_link', {}))
+            cfg['codex'] = False
+            self.cfg.set('agent_link', cfg)
+            self.cfg.save()
+            self.apply_config()
+        if hasattr(self.win, 'show_bubble'):
+            self.win.show_bubble('正在安装 Codex 联动插件…' if enabled else '正在卸载 Codex 联动插件…', duration_ms=4000)
+        def work():
+            try:
+                from .codex_install import install_bridge, remove_bridge
+                ok, message = (install_bridge if enabled else remove_bridge)(cancel=self._worker_cancel)
+                if not self._shutdown:
+                    self.install_finished.emit('codex', ok, message, token)
+            except Exception as exc:
+                if not self._shutdown:
+                    try:
+                        self.install_finished.emit('codex', False, str(exc), token)
+                    except RuntimeError:
+                        pass
+            finally:
+                with self._respond_threads_lock:
+                    self._respond_threads.discard(threading.current_thread())
+        worker = threading.Thread(target=work, daemon=True, name='codex-plugin-install')
+        with self._respond_threads_lock:
+            self._respond_threads.add(worker)
+        worker.start()
+        return False  # QAction stays unchecked until the queued success callback.
+
     def set_enabled(self, agent_key: str, enabled: bool) -> bool:
         """开启或关闭指定 Agent 监视器（必要时弹出确认框）。
 
         返回 False 表示未生效（用户拒绝授权 / hooks 安装失败），调用方应回滚 UI 勾选态。"""
         if agent_key not in self.monitors:
             return False
+
+        if agent_key == 'codex':
+            if not enabled:
+                self._last_raw.pop('codex', None)
+                self._last_applied.pop('codex', None)
+                getattr(self, '_snapshot_status', {}).pop('codex', None)
+                self._cancel_done_check('codex')
+                self._cost.abort('codex')
+                if not self.any_busy() and hasattr(self.win, 'request_link_idle'):
+                    self.win.request_link_idle()
+            if enabled or not self._other_instances_enabled('codex'):
+                return self._change_codex_install(bool(enabled))
+            # Another pet still uses the global plugin: only stop this reader.
 
         if enabled:
             # 针对需要注入 hooks 的 Agent 弹窗征求用户同意
