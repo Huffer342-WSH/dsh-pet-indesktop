@@ -267,6 +267,8 @@ class PetSpeechBubble(QFrame):
         # flag 才是防止定时 show() 抢走其他应用输入光标的硬约束。
         flags |= Qt.WindowType.WindowDoesNotAcceptFocus
         self.setWindowFlags(flags)
+        from .platform_linux import keep_on_all_desktops
+        keep_on_all_desktops(self)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
