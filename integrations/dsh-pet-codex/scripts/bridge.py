@@ -7,9 +7,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import sys
 import tempfile
 import time
+
+if 'diagnostic' not in globals():
+    diagnostic = runpy.run_path(str(Path(__file__).with_name('diagnostics.py')))['diagnostic']
 
 MAX_BYTES = 1024 * 1024
 MAX_SESSIONS = 128
@@ -123,19 +127,49 @@ def record(payload: dict, root: Path) -> None:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+    return True
 
 
 def main() -> int:
+    phase = 'enabled_check'
+    event = ''
     try:
+        # A client may retain a hook definition after uninstall. The immutable
+        # runtime stays available, but disabled integrations do no work.
+        if '--bridge-enabled-file' in sys.argv:
+            marker = Path(sys.argv[sys.argv.index('--bridge-enabled-file') + 1])
+            if not marker.is_file():
+                # Drain without retaining content so the host can finish its
+                # stdin write even for a payload larger than the pipe buffer.
+                while sys.stdin.buffer.read(65536):
+                    pass
+                print('{}')
+                return 0
+        phase = 'parse_input'
         raw = sys.stdin.buffer.read(MAX_BYTES + 1)
         if len(raw) <= MAX_BYTES:
             payload = json.loads(raw)
             if isinstance(payload, dict):
-                record(payload, directory())
-    except Exception:
+                event = payload.get('hook_event_name', '')
+                event = event if isinstance(event, str) else ''
+                phase = 'write_state'
+                changed = record(payload, directory())
+                if changed and event in ('SessionStart', 'UserPromptSubmit'):
+                    diagnostic('state_updated', event=event)
+            else:
+                diagnostic('invalid_payload')
+        else:
+            while sys.stdin.buffer.read(65536):
+                pass
+            diagnostic('input_too_large')
+    except BaseException as exc:
         # Telemetry must never reject a prompt, tool or permission request.
+        diagnostic(phase, exc, event=event)
+    try:
+        print('{}')  # Stop hooks require JSON; no decisions or additionalContext.
+        sys.stdout.flush()
+    except BaseException:
         pass
-    print('{}')  # Stop hooks require JSON; no decisions or additionalContext.
     return 0
 
 

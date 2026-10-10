@@ -6,6 +6,7 @@ import sys
 
 
 def main():
+    diagnostic = None
     try:
         # Windows windowed PyInstaller builds set Python streams to None even when
         # their parent supplies redirected handles. Reopen those supplied pipes.
@@ -24,10 +25,31 @@ def main():
                     fd = msvcrt.open_osfhandle(handle, flags)
                     setattr(sys, name, os.fdopen(fd, mode, encoding='utf-8'))
         root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1]))
-        runpy.run_path(str(root / 'integrations/dsh-pet-codex/scripts/bridge.py'), run_name='__main__')
+        scripts = root / 'integrations/dsh-pet-codex/scripts'
+        guard = runpy.run_path(str(scripts / 'diagnostics.py'))
+        diagnostic = guard['diagnostic']
+        if '--bridge-worker' in sys.argv:
+            runpy.run_path(str(scripts / 'bridge.py'), init_globals={'diagnostic': diagnostic}, run_name='__main__')
+        else:
+            prefix = [sys.executable] if getattr(sys, 'frozen', False) else [sys.executable, '-m', 'pet']
+            args = [arg for arg in sys.argv[1:] if arg != '--agent-hook']
+            return guard['main']([*prefix, '--agent-hook', '--bridge-worker', *args])
     except SystemExit as exc:
-        return exc.code or 0
-    except Exception:
-        if sys.stdout is not None:
-            print('{}')
+        if exc.code and diagnostic:
+            diagnostic('packaged_worker_exit', exc)
+        if '--bridge-worker' not in sys.argv:
+            try:
+                print('{}')
+                sys.stdout.flush()
+            except BaseException:
+                pass
+    except BaseException as exc:
+        if diagnostic:
+            diagnostic('packaged_start', exc)
+        try:
+            if sys.stdout is not None:
+                print('{}')
+                sys.stdout.flush()
+        except BaseException:
+            pass
     return 0

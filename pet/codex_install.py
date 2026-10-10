@@ -1,6 +1,7 @@
 """Desktop-owned local plugin installation through the Codex CLI."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -16,6 +17,9 @@ import time
 PLUGIN = 'dsh-pet-codex'
 MARKETPLACE = 'dsh-pet-local'
 OWNER = '.dsh-pet-owned-v1'
+ENABLED = '.hooks-enabled'
+RETIRED_HOOK = ('# Retired desktop-pet hook; old sessions may still call this path.\n'
+                'import sys\nwhile sys.stdin.buffer.read(65536):\n    pass\nprint("{}")\n')
 
 
 def codex_home() -> Path:
@@ -79,15 +83,41 @@ def stage_plugin(root: Path, *, source: Path | None = None) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     hooks_path = target / 'hooks/hooks.json'
     hooks = json.loads(hooks_path.read_text(encoding='utf-8'))
-    digest = hashlib.sha256((target / 'scripts/bridge.py').read_bytes() +
+    guard = (target / 'scripts/diagnostics.py').read_bytes()
+    bootstrap = 'import base64;exec(base64.b64decode(' + repr(base64.b64encode(
+        guard + b'\nraise SystemExit(main())\n')) + '))'
+    digest = hashlib.sha256((target / 'scripts/bridge.py').read_bytes() + bootstrap.encode() +
                             hooks_path.read_bytes() + sys.executable.encode() +
                             str(bool(getattr(sys, 'frozen', False))).encode()).hexdigest()[:16]
+    # Codex owns and can remove its cache while another client still uses a
+    # loaded hook definition. Keep immutable runtime versions in our directory.
+    runtime = root / 'runtime' / digest / 'bridge.py'
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    if not runtime.exists():
+        fd, temporary = tempfile.mkstemp(prefix='.bridge-', dir=runtime.parent)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write((target / 'scripts/bridge.py').read_bytes())
+            os.replace(temporary, runtime)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    elif runtime.read_bytes() != (target / 'scripts/bridge.py').read_bytes():
+        raise ValueError('联动脚本版本内容不一致，安装已停止。')
+    guard_path = runtime.with_name('diagnostics.py')
+    if not guard_path.exists():
+        guard_path.write_bytes(guard)
+    elif guard_path.read_bytes() != guard:
+        raise ValueError('联动诊断脚本版本内容不一致，安装已停止。')
+    arguments = ['--bridge-version', digest, '--bridge-enabled-file', str((root / ENABLED).absolute())]
     if getattr(sys, 'frozen', False):
-        command = shlex.join([sys.executable, '--agent-hook', '--bridge-version', digest])
-        windows = subprocess.list2cmdline([sys.executable, '--agent-hook', '--bridge-version', digest])
+        argv = [sys.executable, '--agent-hook', *arguments]
     else:
-        command = shlex.quote(sys.executable) + ' "${PLUGIN_ROOT}/scripts/bridge.py" --bridge-version ' + digest
-        windows = subprocess.list2cmdline([sys.executable]) + ' "${PLUGIN_ROOT}/scripts/bridge.py" --bridge-version ' + digest
+        # Inline the small stdlib supervisor so a missing runtime script is a
+        # logged, successful no-op rather than Python's blocking exit code 2.
+        argv = [sys.executable, '-c', bootstrap, '--bridge-script', str(runtime.absolute()), *arguments]
+    command = shlex.join(argv)
+    windows = subprocess.list2cmdline(argv)
     for groups in hooks['hooks'].values():
         for group in groups:
             for handler in group['hooks']:
@@ -101,6 +131,30 @@ def stage_plugin(root: Path, *, source: Path | None = None) -> Path:
                      'policy': {'installation': 'AVAILABLE', 'authentication': 'ON_INSTALL'},
                      'category': 'Productivity'}]})
     return root
+
+
+def _legacy_hook_paths(home):
+    """Remember pre-runtime hook paths before the CLI removes their cache."""
+    cache = home / 'plugins/cache' / MARKETPLACE / PLUGIN
+    paths = [path.parent.parent / 'scripts/bridge.py' for path in cache.glob('*/hooks/hooks.json')
+             if '${PLUGIN_ROOT}/scripts/bridge.py' in path.read_text(encoding='utf-8')]
+    # Preserve earlier tombstones across a subsequent install/remove cycle too.
+    paths.extend(path for path in cache.glob('*/scripts/bridge.py')
+                 if path.read_text(encoding='utf-8').startswith('# Retired desktop-pet hook'))
+    return set(paths)
+
+
+def _retire_missing_hooks(paths):
+    # No plugin manifest/registration is restored: these entries only silence
+    # already-loaded legacy hooks, and never resume telemetry after uninstall.
+    for path in paths:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with path.open('x', encoding='utf-8') as stream:
+                    stream.write(RETIRED_HOOK)
+            except FileExistsError:
+                pass
 
 
 def run_command(argv, *, home, cwd, cancel=None, timeout=60):
@@ -148,7 +202,9 @@ def install_bridge(*, home=None, executable=None, cancel=None, run=None):
         lock = QLockFile(str(home / 'dsh-pet-install.lock'))
         if not lock.tryLock(0):
             raise RuntimeError('另一只桌宠正在安装插件，请稍后重试。')
+        legacy_paths = []
         try:
+            legacy_paths = _legacy_hook_paths(home)
             root = stage_plugin(home / 'dsh-pet-marketplace')
             prefix = [executable, '--no-daemon', 'plugin']
             run(prefix + ['marketplace', 'add', str(root), '--json'], home=home, cwd=root, cancel=cancel)
@@ -156,12 +212,18 @@ def install_bridge(*, home=None, executable=None, cancel=None, run=None):
             cache = home / 'plugins/cache' / MARKETPLACE / PLUGIN
             expected = (root / 'plugins' / PLUGIN / 'hooks/hooks.json').read_bytes()
             writer = (root / 'plugins' / PLUGIN / 'scripts/bridge.py').read_bytes()
+            guard = (root / 'plugins' / PLUGIN / 'scripts/diagnostics.py').read_bytes()
             if not any(path.read_bytes() == expected and
-                       (path.parent.parent / 'scripts/bridge.py').read_bytes() == writer
+                       (path.parent.parent / 'scripts/bridge.py').read_bytes() == writer and
+                       (path.parent.parent / 'scripts/diagnostics.py').read_bytes() == guard
                        for path in cache.glob('*/hooks/hooks.json')):
                 raise RuntimeError('Codex 未生成插件安装文件，请检查 Codex 后重试。')
+            (root / ENABLED).touch()
         finally:
-            lock.unlock()
+            try:
+                _retire_missing_hooks(legacy_paths)
+            finally:
+                lock.unlock()
         return True, 'Codex 插件已安装。请在 Codex 中审阅并信任 hooks，然后开始新会话。'
     except Exception as exc:
         return False, str(exc)
@@ -174,11 +236,19 @@ def remove_bridge(*, home=None, executable=None, cancel=None, run=None):
         lock = QLockFile(str(home / 'dsh-pet-install.lock'))
         if not lock.tryLock(0):
             raise RuntimeError('另一只桌宠正在修改插件，请稍后重试。')
+        legacy_paths = []
         try:
+            legacy_paths = _legacy_hook_paths(home)
+            root = home / 'dsh-pet-marketplace'
+            if (root / OWNER).is_file():
+                (root / ENABLED).unlink(missing_ok=True)
             (run or run_command)([executable or find_codex(), '--no-daemon', 'plugin', 'remove',
                                   f'{PLUGIN}@{MARKETPLACE}', '--json'], home=home, cwd=home, cancel=cancel)
         finally:
-            lock.unlock()
+            try:
+                _retire_missing_hooks(legacy_paths)
+            finally:
+                lock.unlock()
         return True, 'Codex 联动已关闭，桌宠安装的插件已卸载。'
     except Exception as exc:
         return False, f'联动已关闭，但插件卸载失败：{exc}'
