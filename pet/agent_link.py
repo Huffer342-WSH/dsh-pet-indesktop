@@ -4207,6 +4207,10 @@ class AgentLinkManager(QObject):
         # "未被占用"，让位/重试门禁失效（普通气泡顶掉识屏占位、重要气泡不排队
         # 重试直接覆盖）。同步修正于 PR57 合并后审计（F1）。
         owned = owner and getattr(self, '_link_bubble_owner', None) == (owner, busy_until)
+        bubble = getattr(self.win, '_speech_bubble', None)
+        if owned and bubble is not None:
+            frame = getattr(bubble, '_agent_data', None)
+            owned = frame is not None and frame is getattr(self, '_link_bubble_frame', None)
         if time.monotonic() < busy_until and not owned:
             if not important or _retried >= 4:
                 return False
@@ -4215,8 +4219,15 @@ class AgentLinkManager(QObject):
                                   t, important=True, duration_ms=duration_ms, _retried=n + 1,
                                   agent_content=agent_content))
             return False
-        self.win.show_bubble(text, duration_ms=duration_ms)
+        if agent_content:
+            self.win.show_bubble(
+                agent_content['body'], duration_ms=duration_ms,
+                agent_title=agent_content['title'], agent_status=agent_content['status'],
+                agent_final=agent_content.get('final', False))
+        else:
+            self.win.show_bubble(text, duration_ms=duration_ms)
         self._link_bubble_owner = (owner, getattr(self.win, '_bubble_busy_until', 0.0))
+        self._link_bubble_frame = getattr(bubble, '_agent_data', None)
         return True
 
     # 阻塞交互兜底清理（approval / question / cordis 共用）。
