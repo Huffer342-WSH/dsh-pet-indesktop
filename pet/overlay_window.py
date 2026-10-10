@@ -7,8 +7,8 @@ overlay 内合成后，宠物移动 = 改 sprite 坐标 + update(脏矩形)，�
 WM/DWM 的窗口移动路径。Phase 0 实测（同目录 probe_report）该路线 GO。
 
 本阶段（1b/2）：Windows 逐像素穿透已接通（复用 platform_win 的
-WS_EX_TRANSPARENT 轮询 + 联合命中，见 showEvent）；非 Windows 联合
-QRegion setMask 与多屏几何留待后续（spec 开放问题 Q1）。
+WS_EX_TRANSPARENT 轮询 + 联合命中，见 showEvent）；Linux/X11 使用输入形状
+保留 sprite 命中区，并把 overlay 扩展到虚拟桌面。
 Phase 3a：右键菜单最小集（contextMenuEvent → sprite_menu.build_sprite_menu）；
 鼠标路由只让左键进拖拽 grab，右键只弹菜单（PetWindow 旧语义）。
 Phase 3b：sprite 位置监听（add_position_listener）——sprite 不产生 moveEvent，
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from . import catalog
 from . import overlay_peripherals
+from .linux_overlay import desktop_geometry, is_x11, LinuxOverlayInput
 from .sprite_menu import build_sprite_menu
 from .sprite_slingshot import SlingshotController
 from .tick_driver import TickDriver
@@ -66,11 +67,14 @@ class OverlayWindow(QWidget):
                             | Qt.WindowType.WindowStaysOnTopHint)
         from .platform_linux import keep_on_all_desktops
         keep_on_all_desktops(self)
+        if is_x11():
+            self.setWindowFlag(Qt.WindowType.X11BypassWindowManagerHint)
+            self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        # Phase 1a 暂不做多屏：默认主屏，调用方可注入别的 QScreen。
+        # X11 covers the virtual desktop; other backends retain their screen geometry.
         self._screen = screen or QApplication.primaryScreen()
-        self.setGeometry(self._screen.geometry())
+        self.setGeometry(desktop_geometry(self._screen))
 
         self.sprites: list = []
         self._mouse_grab = None
@@ -97,7 +101,7 @@ class OverlayWindow(QWidget):
         # Windows 逐像素穿透协议字段（WindowsPerPixelInputController 直接复用，
         # 见 showEvent）：mouse_through = 用户手动"鼠标穿透"开关（恒穿透）；
         # _press_global 非 None = 拖拽中（穿透轮询据此降频并强制不穿透）。
-        # 非 Windows 平台的联合 QRegion setMask 穿透为后续阶段。
+        # X11 input shapes are handled by LinuxOverlayInput.
         self.mouse_through = False
         self._press_global: QPoint | None = None
         self._drag_committed = False  # 过 DRAG_THRESHOLD 才升级真拖拽（点击候选期 False）
@@ -128,6 +132,7 @@ class OverlayWindow(QWidget):
         # 旧属性面（deprecation）：overlay._timer 即驱动器时钟，供旧调用点
         # （测试同步驱动/间隔断言）沿用；新代码请走 tick_driver。
         self._timer = self._driver.timer
+        self._linux_input = LinuxOverlayInput(self) if is_x11() else None
 
     @staticmethod
     def _tick_interval_ms(refresh_rate: float) -> int:
@@ -436,7 +441,7 @@ class OverlayWindow(QWidget):
             return  # 屏信号可能晚于窗口销毁（见 _alive）
         screen = self._screen
         if screen is not None:
-            geo = screen.geometry()
+            geo = desktop_geometry(screen)
             if self.geometry() != geo:
                 self.setGeometry(geo)
         self._refresh_tick_interval()
@@ -604,6 +609,7 @@ class OverlayWindow(QWidget):
         """用户手动穿透开关的统一直写点（菜单/集成层）；shell 可挂
         _through_changed 回调收编为"用户穿透 + 自动穿透"的复合语义。"""
         self.mouse_through = bool(on)
+        self.update()
         cb = getattr(self, "_through_changed", None)
         if callable(cb):
             cb(self.mouse_through)
