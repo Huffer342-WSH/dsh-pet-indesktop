@@ -18,8 +18,18 @@ if 'diagnostic' not in globals():
 MAX_BYTES = 1024 * 1024
 MAX_SESSIONS = 128
 TERMINAL = {'stopped', 'interrupted', 'closed'}
-EVENTS = {'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest',
+EVENTS = {'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest',
           'Stop', 'Interrupt', 'SessionEnd'}
+
+
+def recent(records, budget):
+    result = {}
+    for key, entry in sorted(records.items(), key=lambda item: item[1]['updated_at'], reverse=True)[:MAX_SESSIONS]:
+        size = len(json.dumps({key: entry}, ensure_ascii=False).encode('utf-8'))
+        if size <= budget:
+            result[key] = entry
+            budget -= size
+    return result
 
 
 def directory() -> Path:
@@ -61,12 +71,13 @@ def locked(path):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def record(payload: dict, root: Path) -> None:
+def record(payload: dict, root: Path) -> bool:
     event = payload.get('hook_event_name')
     session = str(payload.get('session_id') or '')[:200]
     turn = str(payload.get('turn_id') or '')[:200]
-    if event not in EVENTS or not session or (not turn and event != 'SessionEnd'):
-        return
+    if event not in EVENTS or not session or (not turn and event not in {'SessionStart', 'SessionEnd'}):
+        diagnostic('invalid_event_fields', event=event if isinstance(event, str) else '')
+        return False
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(root / 'state.lock'):
         path = root / 'state.json'
@@ -74,14 +85,25 @@ def record(payload: dict, root: Path) -> None:
             with path.open('rb') as stream:
                 data = json.loads(stream.read(MAX_BYTES + 1))
             if data.get('version') != 1 or not isinstance(data.get('sessions'), dict):
-                return  # A newer/corrupt schema must not be silently overwritten.
+                diagnostic('unsupported_snapshot', event=event)
+                return False  # A newer/corrupt schema must not be silently overwritten.
         except FileNotFoundError:
             data = {'version': 1, 'sessions': {}}
         sessions = data['sessions']
         session_key = hashlib.sha256(session.encode()).hexdigest()[:32]
         key = hashlib.sha256((session + '\0' + turn).encode()).hexdigest()[:32]
         now = time.time()
-        if event == 'SessionEnd':
+        metadata = data.setdefault('metadata', {})
+        meta = metadata.setdefault(session_key, {'id': session})
+        for field in ('transcript_path', 'cwd'):
+            value = payload.get(field)
+            if isinstance(value, str) and value:
+                meta[field] = value[:4096]
+        meta['updated_at'] = now
+        if event == 'SessionStart':
+            meta['source'] = str(payload.get('source') or '')[:32]
+            meta['started_at'] = now
+        elif event == 'SessionEnd':
             for entry in sessions.values():
                 if entry['session'] == session_key and entry['state'] not in TERMINAL:
                     entry.update(state='closed', updated_at=now, event=event)
@@ -91,13 +113,20 @@ def record(payload: dict, root: Path) -> None:
                 # Ignore child/tool events without a root prompt. This also avoids
                 # treating a late completion from before installation as a new task.
                 if event != 'UserPromptSubmit':
-                    return
+                    return False
                 entry = {'session': session_key, 'state': 'thinking', 'calls': {}, 'tool': ''}
+                entry.update(turn_id=turn, started_at=now, transcript_offset=0)
+                try:
+                    transcript = Path(meta.get('transcript_path', ''))
+                    if transcript.is_file():
+                        entry['transcript_offset'] = transcript.stat().st_size
+                except OSError:
+                    pass
                 sessions[key] = entry
             elif entry['state'] in TERMINAL:
-                return  # A delayed tool hook must not revive a terminal turn.
+                return False  # A delayed tool hook must not revive a terminal turn.
             elif event == 'UserPromptSubmit':
-                return  # Duplicate delivery must not reset work or waiting.
+                return False  # Duplicate delivery must not reset work or waiting.
             call_id = str(payload.get('tool_use_id') or '')
             call = hashlib.sha256(call_id.encode()).hexdigest()[:32] if call_id else ''
             tool = str(payload.get('tool_name') or '').lower()
@@ -108,17 +137,26 @@ def record(payload: dict, root: Path) -> None:
             elif event == 'PreToolUse':
                 if call and len(entry['calls']) < 128:
                     entry['calls'][call] = tool
-                entry.update(state='working', tool=tool)
+                if entry['state'] != 'waiting':
+                    entry.update(state='working', tool=tool)
             elif event == 'PostToolUse':
                 entry['calls'].pop(call, None)
-                entry.update(state='working' if entry['calls'] else 'thinking', tool='')
+                waiting = entry.get('waiting_calls', {})
+                if call:
+                    waiting.pop(call, None)
+                if entry['state'] != 'waiting' or (call and 'waiting_calls' in entry and not waiting):
+                    entry.update(state='working' if entry['calls'] else 'thinking', tool='')
             elif event == 'PermissionRequest':
+                waiting = entry.setdefault('waiting_calls', {})
+                if len(waiting) < 128:
+                    waiting[call] = tool
                 entry.update(state='waiting', tool=tool)
             else:
-                entry.update(state='stopped' if event == 'Stop' else 'interrupted', calls={}, tool='')
+                entry.update(state='stopped' if event == 'Stop' else 'interrupted', calls={}, waiting_calls={}, tool='')
             entry.update(event=event, updated_at=now)
         # Bounded snapshot: keep the most recently updated turns, never transcripts.
-        data['sessions'] = dict(sorted(sessions.items(), key=lambda item: item[1]['updated_at'])[-MAX_SESSIONS:])
+        data['sessions'] = recent(sessions, (MAX_BYTES - 1024) * 2 // 3)
+        data['metadata'] = recent(metadata, (MAX_BYTES - 1024) // 3)
         fd, temporary = tempfile.mkstemp(prefix='.state-', dir=root)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:

@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/diagnostics.py\"",
+            "commandWindows": "python \"${PLUGIN_ROOT}/scripts/diagnostics.py\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
