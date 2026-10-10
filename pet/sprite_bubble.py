@@ -92,7 +92,12 @@ class SpriteBubbleFollower:
         self._on_sprite_moved(sprite)
 
     def anchor(self) -> QRect:
-        return sprite_anchor_rect_global(self._sprite, self._origin)
+        # The WM can move a native window after construction; use its real origin.
+        if hasattr(self._overlay, "mapToGlobal"):
+            origin = self._overlay.mapToGlobal(QPoint(0, 0))
+        else:
+            origin = self._origin
+        return sprite_anchor_rect_global(self._sprite, origin)
 
     def _on_sprite_moved(self, sprite) -> None:
         if self._closed or self.bubble is None:
