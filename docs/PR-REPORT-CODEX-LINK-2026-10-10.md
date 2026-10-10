@@ -1,6 +1,6 @@
 # Codex 菜单安装、会话进展与结构化气泡
 
-基线：`origin/main@ee699c7`；分支：`feat/codex-integration-pr`；日期：2026-10-10。
+差分基线：`fix/pyside612-runtime@f38c186`（前置兼容修复，上游基线`ee699c7`）；分支：`feat/codex-integration-pr`；日期：2026-10-10。
 关联：[开发交付规范](DEV-HANDOVER.md#八开发流程规范)、[打包流程](ONEDIR_PACKAGING.md)。本报告只覆盖此独立分支，集成预发布结果不能代替分支验证。
 
 ## 核心特性
@@ -9,10 +9,12 @@
 
 ## 修改文件说明
 
-相对基线的实现和验证文件如下。报告自身为新增，`docs/INDEX.md` 登记本报告；最终行数使用 `git diff --numstat origin/main...HEAD` 复核。
+相对上述差分基线的最终文件清单（包含本报告与索引）。
 
 | 文件 | 增删 | 修改及原因 |
 |---|---|---|
+| `docs/INDEX.md` | +2/−1 | 登记本报告并关联已有文档，避免孤立交付记录。 |
+| `docs/PR-REPORT-CODEX-LINK-2026-10-10.md` | +84/−0 | 记录逐文件改动、性能、实机/CI验证、失败历史与回滚；本次末尾补充最终结果。 |
 | `integrations/dsh-pet-codex/.codex-plugin/plugin.json` | +17/−0 | 声明本地 Codex 插件身份与能力。 |
 | `integrations/dsh-pet-codex/hooks/hooks.json` | +100/−0 | 注册生命周期、工具和权限 hook。 |
 | `integrations/dsh-pet-codex/scripts/bridge.py` | +215/−0 | 将 hook 转为有界快照，维护会话、轮次及并发审批状态。 |
@@ -36,15 +38,15 @@
 | `pet/window.py` | +7/−35 | 转发气泡参数；将展示辅助逻辑放到 window_alerts，遵守主窗口行数预算。 |
 | `pet/window_alerts.py` | +47/−0 | 承接普通及结构化气泡展示，保留提醒优先级和持有时间。 |
 | `pet/window_optional_services.py` | +1/−1 | 增加 Codex 在联动服务启用条件中的判断。 |
+| `scripts/benchmark_codex_link.py` | +53/−0 | 新增可复现性能测量入口，临时数据不接触用户配置。 |
+| `tests/codex_helpers.py` | +19/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
 | `tests/test_agent_link.py` | +1/−0 | 更新既有集成测试的配置或支持列表，与新增 Codex 行为一致。 |
+| `tests/test_codex_bubble.py` | +95/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
+| `tests/test_codex_file_watch.py` | +127/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
+| `tests/test_codex_hook_runtime.py` | +141/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
+| `tests/test_codex_install.py` | +40/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
+| `tests/test_codex_transcript.py` | +270/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
 | `tests/test_desktop_pet_features.py` | +13/−1 | 更新既有集成测试的配置或支持列表，与新增 Codex 行为一致。 |
-| `tests/codex_helpers.py`（新增） | +19/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `tests/test_codex_bubble.py`（新增） | +95/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `tests/test_codex_file_watch.py`（新增） | +105/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `tests/test_codex_hook_runtime.py`（新增） | +141/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `tests/test_codex_install.py`（新增） | +40/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `tests/test_codex_transcript.py`（新增） | +270/−0 | 新增回归用例或共享辅助代码，覆盖安装隔离、hook 容错、会话增量、Qt 事件交付或原生 X11 行为。 |
-| `scripts/benchmark_codex_link.py`（新增） | +53/−0 | 新增可复现性能测量入口，临时数据不接触用户配置。 |
 
 ## 性能分析
 
@@ -63,3 +65,20 @@
 ## 风险与回滚
 
 Codex 本地 JSONL 格式可能变化；用户必须自行确认 hook 信任。日志不保存提示词和工具输出。卸载后保留不可变 hook 脚本，避免旧会话调用缺失路径。回滚程序后重启；不自动修改 Codex 信任设置。
+
+## 最终交付记录（2026-10-10）
+
+完整集成提交`6ae3519`的[三平台CI](https://github.com/Huffer342-WSH/dsh-pet-indesktop/actions/runs/38044045940)及Linux/macOS/Windows三条构建均通过；[预发布](https://github.com/Huffer342-WSH/dsh-pet-indesktop/releases/tag/preview-4.2.1-codex.20261010.1)已公开，包含8份产物。发布标签指向实际构建提交，后续报告更新不改变安装包来源。
+
+最终Linux纯桌宠包在本机隔离配置、缓存、用户数据和网络后，offscreen及原生X11各运行15秒无提前退出或Traceback；frozen hook退出0、输出{}、stderr为空，无_MEI目录。独立进程加载包内两份原生库并核对/proc/self/maps后，六项单例引用探针全0。ZIP SHA256：`5abaa92b2becb6fd2233a30df0d0a42af191a469792af714b06d32eac20fef85`。Windows/macOS的原生桌面人工验收仍未完成。
+
+独立分支按仓库CI方式分进程覆盖全套测试（没有跳过失败用例）：
+
+| 分组 | 结果 |
+|---|---|
+| main | 4253 passed, 37 skipped, 21 warnings in 178.69s (0:02:58) |
+| webm | 41 passed in 25.60s |
+| warm | 27 passed in 31.35s |
+| recovery | 5 passed in 0.26s |
+
+聚焦、ruff和diffcheck均通过；最终提交仅追加本报告，应用、工作流及测试代码与上述验证时一致。
