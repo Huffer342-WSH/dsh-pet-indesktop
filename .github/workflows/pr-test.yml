@@ -4,9 +4,10 @@ name: PR Test Gate
 # 职责不同——本工作流给每个 PR 提供红绿判定，防止「测试只在本机是财富」。
 
 on:
+  workflow_dispatch:  # 验证 fork 分支，无需先创建上游 PR
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'ci/**']
 
 permissions:
   contents: read
