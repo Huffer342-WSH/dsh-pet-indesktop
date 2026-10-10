@@ -582,6 +582,14 @@ class OverlayWindow(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         region = event.region()
+        # WA_NoSystemBackground 禁止 Qt 擦除背景；局部刷新必须由这里把旧帧写回
+        # 透明，否则 sprite 移动/变形后的旧区域会保留 backing store 像素，
+        # X11 合成器上可短暂表现为纯色方块。只清 event.region()，保持脏矩形
+        # 渲染的成本边界；Source 模式确保透明色真正替换目标 alpha。
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        for rect in region:
+            painter.fillRect(rect, Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         for sprite in self.sprites:  # 列表序 = z-order：先画底层，尾部最上
             if not getattr(sprite, "visible", True):
                 continue  # M14：隐藏 sprite 跳过绘制（脏区域照旧被覆盖擦除）
