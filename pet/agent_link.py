@@ -35,7 +35,7 @@ from stat import S_ISREG
 from typing import Any, Callable
 from urllib.parse import unquote
 
-from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QTimer, Qt, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from . import agent_cost as agent_cost_mod
@@ -1411,6 +1411,8 @@ class BaseAgentMonitor(QObject):
         with self._outbox_lock:
             self._outbox.clear()
         self._worker_stop.set()
+        if hasattr(self, "_worker_wake"):
+            self._worker_wake.set()
 
     def finish_stop(self, deadline: float | None = None) -> None:
         worker = self._worker
@@ -1471,6 +1473,8 @@ class BaseAgentMonitor(QObject):
             if getattr(mon, "_destroyed_conn", None) is not None:
                 mon._destroyed_conn = None
             mon._worker_stop.set()
+            if hasattr(mon, "_worker_wake"):
+                mon._worker_wake.set()
             mon._emit_gen = -1
             mon._running = False
             mon._paused = False
@@ -2431,20 +2435,61 @@ class SnapshotAgentMonitor(BaseAgentMonitor):
     """Read-only session snapshots; reuse the existing worker/Qt lifecycle."""
 
     snapshot_event = Signal(str, object, int)
+    watch_paths = Signal(object, int)
 
     def __init__(self, agent_key, config_dir, events_path, parent=None):
         super().__init__(agent_key, config_dir, parent)
         from .agent_snapshot import SnapshotReader
+        from .codex_install import codex_home
         self._snapshot_path = events_path
-        self._reader = SnapshotReader(events_path)
+        self._codex_home = codex_home() if agent_key == 'codex' else None
+        self._reader = SnapshotReader(events_path, codex_home=self._codex_home)
         self._mkdir_on_start = False
+        from .agent_file_watch import AgentFileWatch
+        self._worker_wake = threading.Event()
+        self._file_watch = AgentFileWatch(self._worker_wake, self)
+        self.watch_paths.connect(self._file_watch.update_paths, Qt.ConnectionType.QueuedConnection)
+
+    def start(self):
+        if not super().start():
+            return False
+        self._file_watch.generation = self._emit_gen
+        self._file_watch.update_paths([self._snapshot_path], self._emit_gen)
+        self._worker_wake.set()
+        return True
+
+    def begin_stop(self):
+        self._file_watch.stop()
+        super().begin_stop()
+
+    def resume(self):
+        super().resume()
+        self._worker_wake.set()
+
+    def _work_loop(self, gen):
+        self._worker_started()
+        while not self._worker_stop.is_set():
+            # Wake only for file events or an existing session's expiry deadline.
+            self._worker_wake.wait(None if self._paused else self._reader.expiry_delay())
+            self._worker_wake.clear()
+            if self._worker_stop.is_set():
+                break
+            if not self._paused:
+                try:
+                    self._poll(gen)
+                except Exception:
+                    log.debug("Snapshot reader failed", exc_info=True)
 
     def _worker_started(self):
         from .agent_snapshot import SnapshotReader
-        self._reader = SnapshotReader(self._snapshot_path)
+        self._reader = SnapshotReader(self._snapshot_path, codex_home=self._codex_home)
 
     def _poll(self, gen=None):
         summary = self._reader.read()
+        generation = self._emit_gen if gen is None else gen
+        self.watch_paths.emit(self._reader.watch_paths(), generation)
+        if self._reader.has_backlog():
+            self._worker_wake.set()
         if summary is not None:
             self._emit(self.snapshot_event, (self.agent_key, summary, self._emit_gen if gen is None else gen))
 
@@ -2677,6 +2722,8 @@ class AgentLinkManager(QObject):
         self.apply_config()
 
     def _on_session_snapshot(self, agent_key, summary, gen):
+        from .codex_transcript import short_text
+
         if not self._gen_current(agent_key, gen):
             return
         previous = getattr(self, '_snapshot_status', {}).get(agent_key, {})
@@ -2690,7 +2737,7 @@ class AgentLinkManager(QObject):
         if busy:
             state = 'thinking' if summary['thinking'] == summary['busy'] else 'working'
             self._on_agent_state(agent_key, state, gen)
-            if summary['tool']:
+            if summary['tool'] and not summary.get('detail'):
                 self._on_agent_activity(agent_key, summary['tool'], gen)
         else:
             self._last_raw[agent_key] = 'idle'
@@ -2699,12 +2746,29 @@ class AgentLinkManager(QObject):
             if not self.any_busy() and hasattr(self.win, 'request_link_idle'):
                 self.win.request_link_idle()
         name = self.agent_names.get(agent_key, agent_key)
-        cfg = self.cfg.get('agent_link', {})
-        if summary['waiting'] and summary['waiting'] != previous.get('waiting') and self._report_allowed(cfg, 'agent.attention'):
-            self._show_link_bubble(f"{name} 有 {summary['waiting']} 个回合等待处理，请回到原窗口查看。", important=True)
-        elif summary['unknown'] and summary['unknown'] != previous.get('unknown') and self._report_allowed(cfg, 'bridge.status'):
+        waiting_changed = (summary['waiting'] != previous.get('waiting') or
+                           summary.get('detail', {}).get('key') != previous.get('detail', {}).get('key'))
+        if summary['waiting'] and waiting_changed:
+            anim = self._snapshot_anim(agent_key, 'waiting')
+            if anim and getattr(self.win, 'isVisible', lambda: False)() and hasattr(self.win, 'request_link_anim'):
+                self.win.request_link_anim(anim)
+        if summary['waiting']:
+            if waiting_changed:
+                title = short_text(summary.get('detail', {}).get('title', name), 12)
+                self._show_link_bubble(f"{title}\n{name} 有 {summary['waiting']} 个回合等待处理，请回到原窗口查看。", important=True,
+                                       agent_content=dict(title=summary.get('detail', {}).get('title', name),
+                                                          status='等待处理',
+                                                          body='请回到原窗口确认权限或回答问题。'))
+        elif summary['unknown'] and summary['unknown'] != previous.get('unknown'):
             self._show_link_bubble(f"{name} 的联动状态暂不可用，请到原窗口确认。", important=False)
-        elif summary['ended'] and self._report_allowed(cfg, 'done.attention'):
+        elif summary.get('final'):
+            final = summary['final']
+            self._show_link_bubble(
+                f"{short_text(final['title'], 12)} · 回复结束\n{short_text(final['text'], 40)}",
+                important=True, agent_content=dict(title=final["title"], status="回复结束",
+                                                   body=final["text"], final=True,
+                                                   owner=(agent_key, gen, final.get("key"))))
+        elif summary['ended']:
             if 'interrupted' in summary['ended']:
                 text = f"{name} 的回合已中断。"
             elif 'stopped' in summary['ended']:
@@ -2712,6 +2776,55 @@ class AgentLinkManager(QObject):
             else:
                 text = f"{name} 的会话已关闭。"
             self._show_link_bubble(text, important=True)
+        elif summary.get('opened') and not summary['waiting']:
+            self._show_link_bubble(f"{short_text(summary['opened'][-1], 12)}\nCodex 会话已就绪。", important=False,
+                                   agent_content=dict(title=summary['opened'][-1], status='已就绪', body=''))
+        elif summary.get('detail') and not summary['waiting']:
+            self._schedule_snapshot_detail(agent_key, gen)
+
+    def _schedule_snapshot_detail(self, agent_key, gen):
+        """Coalesce progress without allowing late timers to revive an old turn."""
+        if not hasattr(self, '_snapshot_bubble_pending'):
+            self._snapshot_bubble_pending = set()
+        if (agent_key, gen) in self._snapshot_bubble_pending:
+            return
+        self._snapshot_bubble_pending.add((agent_key, gen))
+        QTimer.singleShot(80, self, lambda: self._show_snapshot_detail(agent_key, gen))
+
+    def _show_snapshot_detail(self, agent_key, gen):
+        self._snapshot_bubble_pending.discard((agent_key, gen))
+        if not self._gen_current(agent_key, gen):
+            return
+        summary = self._snapshot_status.get(agent_key, {})
+        detail = summary.get('detail')
+        if not detail or summary.get('waiting') or summary.get('ended'):
+            return
+        if not hasattr(self, '_snapshot_bubble_last'):
+            self._snapshot_bubble_last = {}
+        now = self._clock()
+        last, stamp = self._snapshot_bubble_last.get(agent_key, (None, now - .5))
+        if last == detail:
+            return
+        if now - stamp < .5:
+            self._snapshot_bubble_pending.add((agent_key, gen))
+            QTimer.singleShot(max(1, int((.5 - (now - stamp)) * 1000)), self,
+                              lambda: self._show_snapshot_detail(agent_key, gen))
+            return
+        from .codex_transcript import short_text
+
+        activity = detail.get('activity') or ('思考中' if detail['state'] == 'thinking' else '调用工具')
+        # Keep the status visible; only truncate presentation, not session data.
+        text = f"{short_text(detail['title'], 12)} · {activity}"
+        if detail['text']:
+            text += f"\n{short_text(detail['text'], 40)}"
+        shown = self._show_link_bubble(text, important=False, agent_content=dict(
+            title=detail['title'], status=activity, body=detail['text'], final=False,
+            owner=(agent_key, gen, detail['key'])))
+        if shown:
+            self._snapshot_bubble_last[agent_key] = (dict(detail), now)
+        elif (agent_key, gen) not in self._snapshot_bubble_pending:
+            self._snapshot_bubble_pending.add((agent_key, gen))
+            QTimer.singleShot(200, self, lambda: self._show_snapshot_detail(agent_key, gen))
 
     def _on_normalized_event(self, event) -> None:
         """Consume semantic events for streak tracking and interaction cleanup."""
@@ -3207,10 +3320,11 @@ class AgentLinkManager(QObject):
             # busy 动作池轮换（写代码/吃Token 为主，每第 3 次插播短摸鱼），
             # 经 request_link_anim 平滑衔接：正在播的一次性动作不被打断。
             # 隐藏中不切动画（零功耗语义），气泡仍经改道上岛。
-            anim = self._next_link_anim_rotation()
+            anim = self._snapshot_anim(agent_key, state) or self._next_link_anim_rotation()
             if anim and not hidden and hasattr(self.win, "request_link_anim"):
                 self.win.request_link_anim(anim)
-            self._maybe_notify_start(agent_key, prev_raw, state)
+            if not getattr(self, '_snapshot_status', {}).get(agent_key, {}).get('detail'):
+                self._maybe_notify_start(agent_key, prev_raw, state)
         elif state == "attention":
             # busy 后的 attention（如 Claude Stop=回合结束）由完成确认流程接管，
             # 避免「需要看一眼」和「完成通知」双气泡；独立出现的才立即提醒
@@ -3236,6 +3350,17 @@ class AgentLinkManager(QObject):
     _LINK_BREAK = ("轻快记录", "漂浮踏步")
     _LINK_MAIN_KEYWORDS = ("代码", "工作", "写", "打字", "敲")
     _LINK_BREAK_KEYWORDS = ("记录", "踏步", "伸懒腰")
+
+    def _snapshot_anim(self, agent_key, state):
+        if state not in ('thinking', 'waiting') or agent_key not in getattr(self, '_snapshot_status', {}):
+            return None
+        acts = list(getattr(self.win, 'cats', {}).get('acts', []) or [])
+        keywords = ('思考',) if state == 'thinking' else ('等待', '张望', '挠头', '惊醒')
+        matches = [name for name in acts if any(word in name for word in keywords)]
+        if matches:
+            self._link_seq += 1
+            return matches[(self._link_seq - 1) % len(matches)]
+        return None
 
     def any_busy(self) -> bool:
         """Return whether an enabled monitor currently reports active work.
@@ -3278,6 +3403,12 @@ class AgentLinkManager(QObject):
         """window 动画结束回调用：仍有 Agent 在忙 → 下一个联动动作；否则 None。
         全员空闲时重置轮换计数——下一个任务从「写代码」重新开始。"""
         if any(s in self._BUSY_STATES for s in self._last_raw.values()):
+            busy = [(key, state) for key, state in self._last_raw.items() if state in self._BUSY_STATES]
+            if all(state == 'thinking' for _, state in busy):
+                for key, state in busy:
+                    anim = self._snapshot_anim(key, state)
+                    if anim:
+                        return anim
             return self._next_link_anim_rotation()
         self._link_seq = 0
         return None
@@ -4036,13 +4167,22 @@ class AgentLinkManager(QObject):
         play_sound(path, volume=float(agent_cfg.get("sound_volume", 0.65)))
 
     def _show_link_bubble(self, text: str, *, important: bool, duration_ms: int = 4500,
-                          _retried: int = 0) -> None:
+                          _retried: int = 0, agent_content: dict | None = None) -> bool:
         """联动气泡：提醒消息队列非空时一律让路（审批/问题/失败等常驻提醒优先）。
 
         无提醒队列时：普通气泡直接让路丢弃；重要气泡每 2.5s 重试至多 4 次
         （约 10s 窗口），仍被占才放弃——主动识屏长答复可能占位 15-20s。"""
+        if getattr(self.win, '_bubble_suppressed', False):
+            return False
+        owner = agent_content.get('owner') if agent_content else None
+        if owner:
+            if not self._gen_current(owner[0], owner[1]):
+                return False
+            current = getattr(self, '_snapshot_status', {}).get(owner[0], {}).get('detail')
+            if agent_content.get('final') and current and current.get('key') != owner[2]:
+                return False
         if not hasattr(self.win, "show_bubble"):
-            return
+            return False
         # 桌宠隐藏时 show_bubble/show_alert 会静默丢弃：改道灵动岛反馈面
         # （AppShell 经 hidden_bubble_redirect 注入；无注入/岛不可用维持丢弃）。
         # 审批/问题等常驻提示气泡不经本函数（走 show_alert 队列），仍需桌宠可见。
@@ -4051,27 +4191,33 @@ class AgentLinkManager(QObject):
             from . import window_alerts as _window_alerts
 
             if _window_alerts.redirect_hidden_bubble(self.win, text, duration_ms=duration_ms):
-                return
+                return True
+            if agent_content:
+                return False
         # 提醒消息队列激活：任何其他弹窗（含重要气泡）都不覆盖提醒
         if getattr(self.win, "_alert_current", None) is not None or \
                 getattr(self.win, "_alert_queue", None):
-            return
-        if not important and getattr(self.win, "_sticky_bubble_active", False):
+            return False
+        if (not important or agent_content) and getattr(self.win, "_sticky_bubble_active", False):
             # 兼容旧路径：审批等一直挂着的气泡优先
-            return
+            return False
         busy_until = getattr(self.win, "_bubble_busy_until", 0.0)
         # window.hold_bubble 以 time.monotonic() 写入 _bubble_busy_until，这里必须
         # 用同一时钟域比较——曾误用 time.time()（epoch 秒），在真实桌宠上恒判
         # "未被占用"，让位/重试门禁失效（普通气泡顶掉识屏占位、重要气泡不排队
         # 重试直接覆盖）。同步修正于 PR57 合并后审计（F1）。
-        if time.monotonic() < busy_until:
+        owned = owner and getattr(self, '_link_bubble_owner', None) == (owner, busy_until)
+        if time.monotonic() < busy_until and not owned:
             if not important or _retried >= 4:
-                return
+                return False
             QTimer.singleShot(2500, self,
                               lambda t=text, n=_retried: self._show_link_bubble(
-                                  t, important=True, _retried=n + 1))
-            return
+                                  t, important=True, duration_ms=duration_ms, _retried=n + 1,
+                                  agent_content=agent_content))
+            return False
         self.win.show_bubble(text, duration_ms=duration_ms)
+        self._link_bubble_owner = (owner, getattr(self.win, '_bubble_busy_until', 0.0))
+        return True
 
     # 阻塞交互兜底清理（approval / question / cordis 共用）。
     # 审批/问题等待期间 Agent 不会走到 turn/end（DSH 仍处于 running）；
