@@ -63,7 +63,23 @@ def test_watch_rearms_missing_and_replaced_file(app, tmp_path):
     poll_until(wake.is_set, timeout=5000)
     assert str(target) in watch.watcher.files()
     wake.clear()
-    script = "from pathlib import Path; p=Path(__import__('sys').argv[1]);q=p.with_suffix('.tmp');q.write_text('[]');q.replace(p)"
+    # Windows indexers/antivirus can briefly hold the newly created file.
+    # Retry only that OS sharing failure; watcher delivery still has its own
+    # deadline and must observe the actual successful atomic replacement.
+    script = """
+from pathlib import Path
+import sys, time, threading
+p = Path(sys.argv[1]); q = p.with_suffix('.tmp'); q.write_text('[]')
+deadline = time.monotonic() + 10
+while True:
+    try:
+        q.replace(p)
+        break
+    except PermissionError:
+        if time.monotonic() >= deadline:
+            raise
+        threading.Event().wait(0.02)
+"""
     subprocess.run([sys.executable, "-c", script, str(target)], check=True)
     poll_until(wake.is_set, timeout=5000)
     assert str(target) in watch.watcher.files()
@@ -82,8 +98,14 @@ def test_monitor_destroy_releases_worker(app, tmp_path, monkeypatch):
     assert monitor._file_watch.watcher is None
     monitor.start()
     worker = monitor._worker
+    # A regression test must not flush other tests' pending QObject deletion.
+    import shiboken6
+
+    unrelated = QObject()
+    unrelated.deleteLater()
     monitor.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QCoreApplication.sendPostedEvents(monitor, QEvent.Type.DeferredDelete)
+    assert shiboken6.isValid(unrelated)
     poll_until(lambda: not worker.is_alive(), timeout=5000)
 
 
