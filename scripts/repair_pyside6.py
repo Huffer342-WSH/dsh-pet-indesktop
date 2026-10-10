@@ -53,8 +53,8 @@ def probe():
     return values  # A negative result may also abort during Python finalization.
 
 
-def run(*args, env=None):
-    subprocess.run([str(arg) for arg in args], check=True, env=env)
+def run(*args, env=None, cwd=None):
+    subprocess.run([str(arg) for arg in args], check=True, env=env, cwd=cwd)
 
 
 def export_source(source: Path, work: Path):
@@ -107,7 +107,7 @@ def repair(work: Path):
     run("git", "-C", source, "apply", PATCH)
     sdk = work / "qt" / "6.12.0/gcc_64"
     if not (sdk / "lib/cmake/Qt6Core/Qt6CoreConfig.cmake").exists():
-        run(sys.executable, "-m", "aqt", "install-qt", "linux", "desktop", "6.12.0", "linux_gcc_64", "--archives", "qtbase", "-O", work / "qt")
+        run(sys.executable, "-m", "aqt", "install-qt", "linux", "desktop", "6.12.0", "linux_gcc_64", "--archives", "qtbase", "-O", work / "qt", cwd=work)
     common = [
         "-G",
         "Ninja",
@@ -117,9 +117,11 @@ def repair(work: Path):
         "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         f"-DPython_EXECUTABLE={sys.executable}",
     ]
+    # Both CMake configure (qmake) and build (rcc) execute SDK tools needing ICU.
+    build_env = {**os.environ, "LD_LIBRARY_PATH": str(sites["PySide6"] / "Qt/lib")}
     shiboken_build = work / "shiboken-build"
-    run("cmake", "-S", source / "sources/shiboken6", "-B", shiboken_build, *common, "-DFORCE_LIMITED_API=ON", f"-DCMAKE_PREFIX_PATH={sdk}")
-    run("cmake", "--build", shiboken_build, "--target", "libshiboken", "--parallel", "4")
+    run("cmake", "-S", source / "sources/shiboken6", "-B", shiboken_build, *common, "-DFORCE_LIMITED_API=ON", f"-DCMAKE_PREFIX_PATH={sdk}", env=build_env)
+    run("cmake", "--build", shiboken_build, "--target", "libshiboken", "--parallel", "4", env=build_env)
     pyside_build = work / "pyside-build"
     run(
         "cmake",
@@ -132,9 +134,8 @@ def repair(work: Path):
         "-DMODULES=Core",
         f"-DCMAKE_PREFIX_PATH={sdk};{sites['shiboken6'] / 'lib/cmake'}",
         f"-DCMAKE_CXX_FLAGS=-I{source / 'sources/shiboken6/libshiboken'} -I{shiboken_build / 'libshiboken'}",
+        env=build_env,
     )
-    # SDK tools need ICU; use the exact Qt/ICU already shipped in the wheel.
-    build_env = {**os.environ, "LD_LIBRARY_PATH": str(sites["PySide6"] / "Qt/lib")}
     run("cmake", "--build", pyside_build, "--target", "pyside6", "--parallel", "4", env=build_env)
     libraries = [
         (shiboken_build / "libshiboken/libshiboken6.abi3.so.6.12", sites["shiboken6"] / "libshiboken6.abi3.so.6.12"),

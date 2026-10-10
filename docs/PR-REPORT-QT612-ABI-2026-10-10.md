@@ -86,3 +86,11 @@ Qt6.12.0 qtbase SDK由aqtinstall下载，用于匹配的公开/私有头文件�
 Python3.11.16 + PySide6/Shiboken6.12.0修复库：`QT_QPA_PLATFORM=offscreen .scratch/ci-venv/bin/python -m pytest -q` **4328passed、42skipped、20warnings，237.15秒，进程正常退出**。ruff、shell语法及diffcheck通过。真实X11相关16passed，最终满载三遍各35passed。
 
 稳态额外测量：同环境`timeit.repeat(method, number=100000, repeat=5)`，QTimer.stop每次中位数0.038µs，Signal.emit为0.180µs；各50万次调用后的对应单例引用差为0。这是修复库的绝对调用成本，不是与错误库的性能提升比例。最终对应源码归档为6995624字节，包含两套运行库源文件、构建辅助代码、许可证、补丁及精确修复脚本。
+
+## CI 构建环境与并发用例补充
+
+第二轮Linux安装包构建、macOS/Windows构建均成功；独立UbuntuCI在配置QtGuiPrivate时发现缺少XKB开发库。补充libxkbcommon-dev，并把wheel的Qt/ICU库路径同时传给CMake配置与编译阶段，避免qmake/rcc缺少ICU73。此项不改变Python或PySide6版本。
+
+完整测试在并行/满载环境中另外暴露两条既有测试的前提问题：唯一记录用例沿用产品1秒锁超时后主动丢弃策略，却断言不能丢任何一条；另一用例把不同读者的观测用同一个最大值比较，线程切换时会把较早取得的合法快照判成回退。只修测试：写入序列化用例使用60秒锁预算，保留独立的短超时测试；每个读者只比较自己的连续观测，并保留最终121条完整记录断言。生产记忆代码不改动。
+
+最终加入上述并发族的满载验证每遍69passed，三遍耗时39.39/25.43/15.71秒。最终全量4328passed、42skipped、20warnings，236.84秒，正常退出。
