@@ -124,3 +124,27 @@ Node bridge 门禁：工作流列出的 7 个 JS 文件共 **34 passed**，`node
 本轮真实客户端核心补测：CLI/App/IDE 共 **9 passed in 0.70s**（隔离 CODEX_HOME）。旧版兼容用例固定读取初始实现 `417a007`，避免 HEAD 前进后把当前实现误当旧版。用户实际 profile 和信任状态未修改。
 
 最终本地全量：`QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q`，**4324 passed、42 skipped、16 warnings，236.88 秒**。Windows hook 用例选择 `commandWindows` 的测试适配另跑 11 passed；Linux 产品行为未修改。ruff 和 `git diff --check` 通过。
+
+## 首轮 GitHub 验证与测试隔离修正
+
+提交 `3ab32a4` 已推送 fork。Actions 首次启用确认在网页完成（REST 权限接口的 enabled=true 不代表 fork 工作流已激活）。CI run 38037952995、Linux 38037955635、macOS 38037957236、Windows 38037959623。
+
+Linux CI 和构建的 pytest 在约 15% 处 exit134，未进入打包；日志显示 PySide6 6.12.0，本机此前为6.11.2。排查发现新增销毁用例全局冲刷 DeferredDelete，违反既有 conftest 的定向清理约束。增加无关 QObject 的存活断言后旧用例失败，改为仅冲刷 monitor 后13项聚焦通过。此结果证明测试隔离缺陷已修，是否解释远端崩溃仍需同版本复验；不把推断写成根因已确认。
+
+### 原生崩溃根因与版本约束
+
+在独立 worktree 的旧提交3ab32a4、Qt6.12.0 下复现 `Fatal Python error: none_dealloc`，栈落在 `AgentFileWatch.stop → QTimer.stop`。最小探针连续三组各100次 QTimer.stop：6.12.0 的 None 引用计数每组 −100，6.11.2 每组0；因此定向删除修正不是这次原生崩溃的完整根因。新增 `tests/test_qt_timer_refcount.py` 在独立子进程检查此行为，6.12.0 红、6.11.2 绿。不限制PySide6版本，保持Python3.11，通过[原生运行库修复](PR-REPORT-QT612-ABI-2026-10-10.md)恢复正确的None引用所有权。用户已有.venv未更改。
+
+Windows构建首轮4278passed/19skipped/1failed：文件替换测试子进程遭遇WinError5，独立WindowsCI同用例成功。测试写入端仅对PermissionError在10秒内重试，仍要求真实替换及原生通知交付；未增加产品文件轮询或降低断言。
+
+## 脏区域透明擦除补充
+
+Overlay 使用 WA_NoSystemBackground，旧绘制路径没有擦除移走 sprite 的像素。paintEvent 先以 CompositionMode_Source 把 event.region() 写回透明，再恢复 SourceOver 绘制新帧。`pet/overlay_window.py` 本轮 +8/−0；`tests/test_overlay_window.py` +24/−1，新增真实 QWidget.render 的旧区域 alpha 断言。旧提交3ab32a4红，新实现绿；本机原生X11该用例与跨屏族共7passed。
+
+命令：`QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/benchmark_overlay_paint.py`（新增测量脚本），1920×1080窗口、320×180脏区，预热100次后测1000次。旧路径中位数/p95为5.28/5.52µs，透明擦除路径11.29/11.83µs；这只测空脏区的Qt渲染成本，不代表真实动画整帧耗时。只随重绘发生，不增加线程、网络、磁盘或持久缓存。
+
+最新本地集成全量（含残影修复与定向销毁用例）：4326passed、42skipped、240.89秒；满载三遍各35passed（3.12/3.37/3.57秒）。这些结果来自Python3.11.16+Qt6.11.2，不代表Qt6.12问题已解决。Python3.12.3+Qt6.12.0的独立最小探针中，stop/setInterval/start各10000次，None引用计数差均为0，正常退出；最终保留CI的Python3.11，不采用迁移到3.12的方案。
+
+## 保持CI版本的最终本地验证
+
+Python3.11 + PySide6 6.12.0保持不变，原生绑定修复及源码分发详见[Qt运行库报告](PR-REPORT-QT612-ABI-2026-10-10.md)。完整集成版本4328passed/42skipped，进程正常退出；真实X11相关16passed，满载三遍各35passed。逐只配置测试的时间戳前提已修正，未改生产音效逻辑。下一轮远端CI和构建使用这一实现重新验证，不复用旧3ab32a4安装包。
