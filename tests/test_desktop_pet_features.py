@@ -2730,7 +2730,7 @@ def test_product_copy_has_no_external_brand_reference():
                     or path.name in {f"{forbidden}_helpers.py", "test_linux_overlay.py"}
                 ))
                 or path in {Path("docs/INDEX.md"),
-                            Path(f"docs/PR-REPORT-{forbidden.upper()}-LINK-2026-10-10.md")}
+                            Path(f"docs/PR-REPORT-{forbidden.upper()}-X11-2026-10-10.md")}
                 or path.name.endswith("-RESEARCH.md")
                 # Contributor/change reports are repository evidence, not
                 # user-facing product copy and may mention external brands.
