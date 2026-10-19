@@ -149,6 +149,8 @@ python -m pip install -r requirements.txt
 python -m pet        # Windows 也可直接双击 run.bat（实际执行 pythonw -m pet）
 ```
 
+Linux 源码环境如果安装了 PySide6 6.12.0，请在首次启动或测试前按 [Qt 运行库修复说明](docs/ONEDIR_PACKAGING.md#linux-qt-612-运行库修复)执行修复脚本；Linux 构建与 CI 会自动执行。
+
 源码入口默认包含 Chat 能力；如果只想验证桌宠核心功能，可使用无 Chat 的打包入口或在本地配置中关闭聊天。完整的环境准备、依赖清单、运行期目录与常用命令见 [`docs/DEV-HANDOVER.md`](docs/DEV-HANDOVER.md) §1.2 与附录 A。
 
 ### 升级

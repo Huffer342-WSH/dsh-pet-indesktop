@@ -442,3 +442,22 @@ macOS / Linux 的真实构建必须在对应 runner 上跑过才算通过——�
 工作流的静态结构、shell 脚本语法与素材供给入口的真实命令行为。
 
 *（内容由AI生成，仅供参考）*
+
+
+## Linux Qt 6.12 运行库修复
+
+Linux 的 PySide6 6.12.0 wheel 在 Python 3.11 下存在单例引用计数缺陷。
+本分支保留 Python 3.11 和 PySide6 6.12.0，通过重建 libshiboken/libpyside 修复，
+不对 PySide6 设置版本上限。源码运行者在当前虚拟环境中执行：
+
+```bash
+sudo apt-get install cmake ninja-build g++ qt6-base-dev libxkbcommon-dev
+python -m pip install aqtinstall==3.3.0
+python scripts/repair_pyside6.py
+```
+
+脚本先运行六项引用计数探针，仅在受影响的 Linux x86_64 环境重建固定版本的
+官方源码；已修复的环境直接返回。源码下载和 Qt SDK 下载需要联网。修复同时替换
+两份运行库；验证失败时恢复原文件。其他版本与平台不执行此修复。
+Linux 构建脚本和 CI 使用同一入口，产物携带修补后的源码、许可证和重建说明，
+详见 [第三方声明](../THIRD_PARTY_NOTICES.md)。

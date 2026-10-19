@@ -336,3 +336,11 @@ headless，本机两个发行名同版本并存、都提供 `cv2` 顶层模块�
   `scripts/export_android_assets.py::copy_notices`，2026-10-17 起）。
 - 手机使用的 WebP 动画与图标由第 2 节角色素材派生，继续保留其署名和
   个人非商业使用限制。工具与验收说明见 [Android 文档](docs/ANDROID.md)。
+
+## Qt-for-Python 6.12.0 runtime ownership repair (Linux)
+
+- Source: https://github.com/pyside/pyside-setup/tree/f50facb83fc3dc5f3240c854668c7a6dd93871b2 (Qt v6.12.0).
+- License: LGPL-3.0-only; the original source also offers Qt commercial and GPL licensing alternatives.
+- Modification: `packaging/patches/qt-for-python-6.12-singleton-refs.patch` makes stable-ABI singleton-return macros use the runtime reference ownership APIs and selects the Shiboken/PySide runtime-only CMake targets.
+- Build/relink instructions: `scripts/repair_pyside6.py`; the build uses the active Python environment and retains the shared-library interface. No application runtime monkey patch is used.
+- Repaired Linux bundles include the corresponding patched source, license texts, and rebuild instructions under `_internal/third_party/shiboken6/`. The rebuilt libraries can replace `_internal/shiboken6/libshiboken6.abi3.so.6.12` and `_internal/PySide6/libpyside6.abi3.so.6.12`.
