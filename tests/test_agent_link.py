@@ -663,6 +663,7 @@ class TestAgentLinkManager:
             "claude": False,
             "cursor": False,
             "opencode": False,
+            "codex": False,
             "custom_agents": [],
             "sound_enabled": False,
             "sound_start_path": "builtin:agent-start",
@@ -4194,6 +4195,7 @@ class TestDshTurnEndSuccessCompletion:
         mon = mgr.monitors["dsh"]
         # 白盒：等效 agent_link.dsh 已启用——收敛管线的迟到信号隔离闸只放行
         # 「监视器在跑」的信号，手动驱动 _poll 的测试必须置真。
+        cfg.data["agent_link"]["dsh"] = True
         mon._running = True
         mon.events_dir.mkdir(parents=True, exist_ok=True)
         mon._tailer._initial_backfill_done = True
@@ -5516,6 +5518,7 @@ class TestMultiDshInstanceIsolation:
         mgr = AgentLinkManager(DummyWin(), cfg, min_interval=0.0, clock=lambda: clock[0])
         mon = mgr.monitors["dsh"]
         # 白盒：等效 agent_link.dsh 已启用——迟到信号隔离闸只放行「监视器在跑」的信号
+        cfg.data["agent_link"]["dsh"] = True
         mon._running = True
         mon.events_dir.mkdir(parents=True, exist_ok=True)
         # 扫描节流关掉（scan_interval=0 是产品合法取值）：本类要的是"新文件当拍摄入"，

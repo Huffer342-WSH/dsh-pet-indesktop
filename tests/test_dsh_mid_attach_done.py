@@ -143,6 +143,7 @@ def _make_rig(tmp_path, monkeypatch) -> _Rig:
     rig.win = rig.mgr.win
     # 白盒：等效 agent_link.dsh 已启用——收敛管线的迟到信号隔离闸只放行
     # 「监视器在跑」的信号，手动驱动 _poll 的测试必须置真。
+    cfg.data["agent_link"]["dsh"] = True
     rig.mon._running = True
     rig.mon.events_dir.mkdir(parents=True, exist_ok=True)
     return rig

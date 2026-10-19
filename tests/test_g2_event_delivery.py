@@ -118,8 +118,8 @@ def harness(tmp_path, monkeypatch):
 
     cfg = Config(base=tmp_path / "cfg")
     # 注意**不**打开 agent_link.dsh：打开会让 apply_config 真的启动监视器 worker
-    # （与手动驱动 _poll 的测试争抢 tailer、并把代次推到 1）。白盒置 _running=True
-    # 即等效"通道已启用"，见 build()。
+    # （与手动驱动 _poll 的测试争抢 tailer、并把代次推到 1）。build() 在构造后
+    # 同时启用配置与运行标志，以手动驱动替代 worker。
     cfg.data["agent_link"].update({
         "sound_enabled": True,
         "sound_cooldown_seconds": 2.0,
@@ -133,10 +133,12 @@ def harness(tmp_path, monkeypatch):
 
     def build(*, prefill: bool = True):
         win = FakeWin()
+        cfg.data["agent_link"]["dsh"] = False
         mgr = AgentLinkManager(win, cfg, min_interval=0.0, clock=lambda: clock[0])
         mon = mgr.monitors["dsh"]
         # 白盒：等效 agent_link.dsh 已启用——迟到信号隔离闸只放行「监视器在跑」
         # 的信号，手动驱动 _poll 的测试必须置真。
+        cfg.data["agent_link"]["dsh"] = True
         mon._running = True
         mon.events_dir.mkdir(parents=True, exist_ok=True)
         if prefill:
