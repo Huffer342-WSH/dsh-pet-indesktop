@@ -134,6 +134,17 @@ def test_declined_bubble_does_not_consume_progress(tmp_path):
         app.processEvents()
 
 
+def test_bubble_anchor_tracks_actual_overlay_position(tmp_path):
+    shell, lib = _make_shell(tmp_path)
+    try:
+        shell.overlay.move(100, 50)
+        follower = shell._bubble_follower
+        assert follower.anchor().topLeft() == shell.overlay.mapToGlobal(shell.sprite.body_rect().topLeft())
+    finally:
+        shell.overlay.close()
+        shell._delete_runtime_marker()
+
+
 def test_status_only_reflow_uses_current_text_scale(app):
     bubble = PetSpeechBubble()
     anchor = QRect(300, 400, 100, 100)

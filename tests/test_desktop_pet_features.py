@@ -2786,7 +2786,8 @@ def test_product_copy_has_no_external_brand_reference():
                     or path.name in {f"{forbidden}_helpers.py", "test_linux_overlay.py", "test_feature_modules_gating.py"}
                 ))
                 or path in {Path("docs/INDEX.md"),
-                            Path(f"docs/PR-REPORT-{forbidden.upper()}-LINK-2026-10-27.md")}
+                            Path(f"docs/PR-REPORT-{forbidden.upper()}-LINK-2026-10-27.md"),
+                            Path("docs/PR-REPORT-X11-DESKTOP-2026-10-27.md")}
                 or path.as_posix().endswith("pet/agent_link/__init__.py")
                 or path.name.endswith("-RESEARCH.md")
                 # Contributor/change reports are repository evidence, not

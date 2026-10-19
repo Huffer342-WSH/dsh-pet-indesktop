@@ -817,6 +817,8 @@ class PetSpeechBubble(QFrame):
         if self._host_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
+        from .platform_linux import keep_on_all_desktops
+        keep_on_all_desktops(self)
         if was_visible:
             self.show()
 
