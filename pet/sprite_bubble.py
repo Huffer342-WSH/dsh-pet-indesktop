@@ -92,7 +92,9 @@ class SpriteBubbleFollower:
         self._on_sprite_moved(sprite)
 
     def anchor(self) -> QRect:
-        return sprite_anchor_rect_global(self._sprite, self._origin)
+        origin = (self._overlay.mapToGlobal(QPoint(0, 0))
+                  if hasattr(self._overlay, "mapToGlobal") else self._origin)
+        return sprite_anchor_rect_global(self._sprite, origin)
 
     def _on_sprite_moved(self, sprite) -> None:
         if self._closed or self.bubble is None:
